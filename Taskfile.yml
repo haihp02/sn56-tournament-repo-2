@@ -1,0 +1,106 @@
+version: "3"
+
+tasks:
+
+  bootstrap:
+    cmds:
+      - sudo -E ./bootstrap.sh
+      - source $HOME/.bashrc
+      - source $HOME/.venv/bin/activate
+
+  config:
+    cmds:
+      - python -m core.create_config
+
+  auditor-config:
+    cmds:
+      - python -m core.create_config --auditor
+
+  miner-config:
+    cmds:
+      - python -m core.create_config --miner
+
+  trainer-config:
+    cmds:
+      - python -m core.create_config --trainer
+
+  miner:
+    cmds:
+      - ENV=DEV uvicorn miner.server:app --reload --host 0.0.0.0 --port 56000 --env-file .1.env --log-level debug
+
+  trainer:
+    cmds:
+      - pm2 delete trainer || true
+      - pm2 start bash --name trainer -- -c 'ENV=DEV uvicorn trainer.asgi:app --reload --host 0.0.0.0 --port 8001 --env-file .trainer.env --log-level debug'
+
+  dbdown:
+    cmds:
+      - docker compose --env-file .vali.env -f docker-compose.yml run dbmate --wait down
+
+  dbup:
+    cmds:
+      - docker compose --env-file .vali.env -f docker-compose.yml run dbmate --wait up
+
+  setup:
+    cmds:
+      - docker compose --env-file .vali.env -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+
+  validator_dev:
+    cmds:
+      - docker compose --env-file .vali.env -f docker-compose.yml -f docker-compose.dev.yml up -d --build --remove-orphans
+      - docker compose --env-file .vali.env -f docker-compose.yml -f docker-compose.dev.yml  run dbmate --wait up
+      - ./utils/start_validator.sh
+
+  autoupdates:
+    cmds:
+      - pm2 delete autoupdater || true
+      - pm2 start "python utils/run_validator_auto_update.py" --name autoupdater
+
+  validator:
+    cmds:
+      - source $HOME/.venv/bin/activate
+      - ./utils/setup_grafana.sh
+      - docker compose --env-file .vali.env -f docker-compose.yml up -d --build --remove-orphans
+      - docker compose rm -f -v grafana
+      - docker compose --env-file .vali.env -f docker-compose.yml up grafana -d
+      - ./utils/start_validator.sh
+
+  postgres:
+    cmds:
+      - |
+        export $(cat .vali.env | grep -v '^#' | xargs)
+        if [ -n "$DATABASE_URL" ]; then
+          echo "Connecting using DATABASE_URL"
+          psql "$DATABASE_URL"
+        else
+          echo "Connecting using individual parameters"
+          PGPASSWORD=$POSTGRES_PASSWORD psql -U $POSTGRES_USER -d $POSTGRES_DB -h $POSTGRES_HOST
+        fi
+
+  install:
+    cmds:
+      - source $HOME/.venv/bin/activate
+      - pip install -e .
+
+  auditor:
+    cmds:
+      - source $HOME/.venv/bin/activate
+      - pm2 delete auditor || true
+      - pm2 start "python -m auditing.audit" --name auditor
+
+  auditor-autoupdates:
+    cmds:
+      - pm2 delete auditor-autoupdates || true
+      - pm2 start "python utils/run_auditor_autoupdate.py" --name auditor-autoupdates
+
+  db-dump:
+    cmds:
+      - export $(cat .vali.env | grep -v '^#' | xargs) && docker run --rm --network=host -v $(pwd):/backup postgres:17 pg_dump --dbname="${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}}" -F c -f /backup/god-db-backup.dump
+
+  db-restore:
+    cmds:
+      - echo "Restoring database. Make sure your database connection parameters are correct in .vali.env"
+      - |
+        export $(cat .vali.env | grep -v '^#' | xargs)
+        docker run --rm --network=host -v $(pwd):/backup postgres:17 bash -c "pg_restore --dbname=\"${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}}\" --clean --if-exists -x -O /backup/god-db-backup.dump || echo 'Restore completed with some errors, which may be safely ignored'"
+
